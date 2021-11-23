@@ -2,48 +2,57 @@ package app
 
 import (
 	"encoding/json"
+
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/cosmos/cosmos-sdk/types/module"
 	"github.com/cosmos/cosmos-sdk/x/auth"
+	"github.com/cosmos/cosmos-sdk/x/auth/exported"
 	"github.com/cosmos/cosmos-sdk/x/bank"
 	"github.com/cosmos/cosmos-sdk/x/params"
+	"github.com/cosmos/cosmos-sdk/x/supply"
 	abci "github.com/tendermint/tendermint/abci/types"
-	cmn "github.com/tendermint/tendermint/libs/common"
 	"github.com/tendermint/tendermint/libs/log"
+	cmn "github.com/tendermint/tendermint/libs/os"
 	tmtypes "github.com/tendermint/tendermint/types"
 	dbm "github.com/tendermint/tm-db"
-	"github.com/withzoo/nameservice/x/nameservice"
 
 	nscdc "github.com/withzoo/nameservice/app/codec"
+	"github.com/withzoo/nameservice/x/nameservice"
 )
 
-const appName = "nameservice"
+const (
+	MainStoreKey = "main"
+	NSStoreKey   = "ns"
+	appName      = "nameservice"
+)
 
 var (
 	ModuleBasics = module.NewBasicManager(
 		auth.AppModuleBasic{},
 		bank.AppModuleBasic{},
 	)
+
+	maccPerms = map[string][]string{
+		auth.FeeCollectorName: nil,
+		supply.ModuleName:     nil,
+	}
 )
 
 type nameServiceApp struct {
 	*baseapp.BaseApp
 	cdc *codec.Codec
 
-	keyMain          *sdktypes.KVStoreKey
-	keyAccount       *sdktypes.KVStoreKey
-	keyNS            *sdktypes.KVStoreKey
-	keyFeeCollection *sdktypes.KVStoreKey
-	keyParams        *sdktypes.KVStoreKey
-	tkeyParams       *sdktypes.TransientStoreKey
+	// keys to access the substores
+	keys  map[string]*sdktypes.KVStoreKey
+	tkeys map[string]*sdktypes.TransientStoreKey
 
-	accountKeeper       auth.AccountKeeper
-	bankKeeper          bank.Keeper
-	feeCollectionKeeper auth.FeeCollectionKeeper
-	paramsKeeper        params.Keeper
-	nsKeeper            nameservice.Keeper
+	accountKeeper auth.AccountKeeper
+	bankKeeper    bank.Keeper
+	supplyKeeper  supply.Keeper
+	paramsKeeper  params.Keeper
+	nsKeeper      nameservice.Keeper
 }
 
 // NewNameServiceApp is a constructor function for nameServiceApp
@@ -55,50 +64,52 @@ func NewNameServiceApp(logger log.Logger, db dbm.DB) *nameServiceApp {
 	// BaseApp handles interactions with Tendermint through the ABCI protocol
 	bApp := baseapp.NewBaseApp(appName, logger, db, auth.DefaultTxDecoder(cdc))
 
+	keys := sdktypes.NewKVStoreKeys(
+		MainStoreKey, auth.StoreKey, NSStoreKey, supply.StoreKey, params.StoreKey,
+	)
+
+	tkeys := sdktypes.NewTransientStoreKeys(params.TStoreKey)
+
 	// Here you initialize your application with the store keys it requires
 	var app = &nameServiceApp{
 		BaseApp: bApp,
 		cdc:     cdc,
 
-		keyMain:          sdktypes.NewKVStoreKey("main"),
-		keyAccount:       sdktypes.NewKVStoreKey("acc"),
-		keyNS:            sdktypes.NewKVStoreKey("ns"),
-		keyFeeCollection: sdktypes.NewKVStoreKey("fee_collection"),
-		keyParams:        sdktypes.NewKVStoreKey("params"),
-		tkeyParams:       sdktypes.NewTransientStoreKey("transient_params"),
+		keys:  keys,
+		tkeys: tkeys,
 	}
 
 	// The ParamsKeeper handles parameter storage for the application
-	app.paramsKeeper = params.NewKeeper(app.cdc, app.keyParams, app.tkeyParams)
+	app.paramsKeeper = params.NewKeeper(app.cdc, keys[MainStoreKey], tkeys[params.TStoreKey])
 
 	// The AccountKeeper handles address -> account lookups
 	app.accountKeeper = auth.NewAccountKeeper(
 		app.cdc,
-		app.keyAccount,
+		keys[auth.StoreKey],
 		app.paramsKeeper.Subspace(auth.DefaultParamspace),
 		auth.ProtoBaseAccount,
 	)
 
+	blacklistedAddrs := make(map[string]bool)
 	// The BankKeeper allows you perform sdk.Coins interactions
 	app.bankKeeper = bank.NewBaseKeeper(
 		app.accountKeeper,
 		app.paramsKeeper.Subspace(bank.DefaultParamspace),
-		bank.DefaultCodespace,
+		blacklistedAddrs,
 	)
 
-	// The FeeCollectionKeeper collects transaction fees and renders them to the fee distribution module
-	app.feeCollectionKeeper = auth.NewFeeCollectionKeeper(cdc, app.keyFeeCollection)
+	app.supplyKeeper = supply.NewKeeper(
+		cdc, keys[supply.StoreKey], &app.accountKeeper, app.bankKeeper, maccPerms,
+	)
 
 	// The NameserviceKeeper is the Keeper from the module for this tutorial
 	// It handles interactions with the namestore
-	app.nsKeeper = nameservice.NewKeeper(
-		app.bankKeeper,
-		app.keyNS,
-		app.cdc,
-	)
+	app.nsKeeper = nameservice.NewKeeper(app.bankKeeper, keys[NSStoreKey], app.cdc)
 
 	// The AnteHandler handles signature verification and transaction pre-processing
-	app.SetAnteHandler(auth.NewAnteHandler(app.accountKeeper, app.feeCollectionKeeper))
+	app.SetAnteHandler(auth.NewAnteHandler(app.accountKeeper,
+		app.supplyKeeper,
+		auth.DefaultSigVerificationGasConsumer))
 
 	// The app.Router is the main transaction router where each module registers its routes
 	// Register the bank and nameservice routes here
@@ -114,16 +125,10 @@ func NewNameServiceApp(logger log.Logger, db dbm.DB) *nameServiceApp {
 	// The initChainer handles translating the genesis.json file into initial state for the network
 	app.SetInitChainer(app.initChainer)
 
-	app.MountStores(
-		app.keyMain,
-		app.keyAccount,
-		app.keyNS,
-		app.keyFeeCollection,
-		app.keyParams,
-		app.tkeyParams,
-	)
+	app.MountKVStores(keys)
+	app.MountTransientStores(tkeys)
 
-	err := app.LoadLatestVersion(app.keyMain)
+	err := app.LoadLatestVersion(keys[MainStoreKey])
 	if err != nil {
 		cmn.Exit(err.Error())
 	}
@@ -152,7 +157,7 @@ func (app *nameServiceApp) initChainer(ctx sdktypes.Context, req abci.RequestIni
 		app.accountKeeper.SetAccount(ctx, acc)
 	}
 
-	auth.InitGenesis(ctx, app.accountKeeper, app.feeCollectionKeeper, genesisState.AuthData)
+	auth.InitGenesis(ctx, app.accountKeeper, genesisState.AuthData)
 	bank.InitGenesis(ctx, app.bankKeeper, genesisState.BankData)
 
 	return abci.ResponseInitChain{}
@@ -163,7 +168,7 @@ func (app *nameServiceApp) ExportAppStateAndValidators() (appState json.RawMessa
 	ctx := app.NewContext(true, abci.Header{})
 	accounts := []*auth.BaseAccount{}
 
-	appendAccountsFn := func(acc auth.Account) bool {
+	appendAccountsFn := func(acc exported.Account) bool {
 		account := &auth.BaseAccount{
 			Address: acc.GetAddress(),
 			Coins:   acc.GetCoins(),
