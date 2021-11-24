@@ -30,7 +30,7 @@ func handleMsgSetName(ctx sdktypes.Context, keeper Keeper, msg MsgSetName) (*sdk
 }
 
 func handleMsgBugName(ctx sdktypes.Context, keeper Keeper, msg MsgBuyName) (*sdktypes.Result, error) {
-	if keeper.GetPrice(ctx, msg.Name).IsAllLT(msg.Bid) {
+	if keeper.GetPrice(ctx, msg.Name).IsAllGT(msg.Bid) {
 		return nil, sdkerrors.Wrap(sdkerrors.ErrInvalidCoins, "Bid not high enough")
 	}
 

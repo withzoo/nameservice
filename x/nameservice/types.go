@@ -18,7 +18,7 @@ type Whois struct {
 }
 
 // MinNamePrice Initial Starting Price for a name that was never previously owned
-var MinNamePrice = sdktypes.Coins{sdktypes.NewInt64Coin(sdktypes.DefaultBondDenom, 1)}
+var MinNamePrice = sdktypes.Coins{sdktypes.NewInt64Coin("nametoken", 1)}
 
 // NewWhois Returns a new Whois with the minprice as the price
 func NewWhois() Whois {

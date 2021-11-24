@@ -2,7 +2,6 @@ package app
 
 import (
 	"encoding/json"
-
 	"github.com/cosmos/cosmos-sdk/baseapp"
 	"github.com/cosmos/cosmos-sdk/codec"
 	sdktypes "github.com/cosmos/cosmos-sdk/types"
@@ -160,7 +159,9 @@ func (app *nameServiceApp) initChainer(ctx sdktypes.Context, req abci.RequestIni
 	auth.InitGenesis(ctx, app.accountKeeper, genesisState.AuthData)
 	bank.InitGenesis(ctx, app.bankKeeper, genesisState.BankData)
 
-	return abci.ResponseInitChain{}
+	return abci.ResponseInitChain{
+		Validators: req.Validators,
+	}
 }
 
 // ExportAppStateAndValidators does the things
